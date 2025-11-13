@@ -1,0 +1,9 @@
+streamlit>=1.39.0
+pandas>=2.2.3
+numpy>=1.26
+scipy>=1.11
+scikit-rf>=0.27
+plotly>=5.14
+# optional (recommended if you want PNG/PDF export)
+kaleido
+reportlab
