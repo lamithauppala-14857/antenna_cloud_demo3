@@ -1,11 +1,5 @@
-# app.py - Antenna Cloud Demo 3 (Fully Loaded)
-# Features:
-# - Sidebar navigation: Viewer, Comparison, 3D Pattern, About
-# - Accepts S-parameter CSVs (frequency_Hz, S11_dB, S21_dB, S12_dB, S22_dB)
-# - Computes VSWR, resonant freq, bandwidth (S11 < -10 dB)
-# - Comparison of two files
-# - 3D radiation pattern from uploaded theta/phi/gain CSV or synthetic if none
-# - Downloadable summary CSV, PNGs; PDF report if reportlab is installed
+# app.py - Antenna Cloud Demo 3 (Fully Loaded) — UPDATED
+# Added: interactive axis controls (X/Y sliders) + Auto-scale toggle for Viewer and Compare modes.
 
 import streamlit as st
 import pandas as pd
@@ -21,11 +15,8 @@ st.set_page_config("Antenna Cloud Demo3", layout="wide", initial_sidebar_state="
 
 # ---------- Utilities ----------
 def read_sparam_csv(file) -> pd.DataFrame:
-    """Read CSV and normalize column names for frequency and common Sparams.
-       Returns DataFrame with frequency_Hz and columns (S11_dB, S21_dB, S12_dB, S22_dB) if present.
-    """
     df = pd.read_csv(file)
-    # Normalize column names (lowercase, remove spaces)
+    # Normalize column names (strip)
     colmap = {c: c.strip() for c in df.columns}
     df.rename(columns=colmap, inplace=True)
     # try to find frequency column
@@ -36,7 +27,6 @@ def read_sparam_csv(file) -> pd.DataFrame:
     else:
         freq_col = freq_cols[0]
     df = df.rename(columns={freq_col: "frequency_Hz"})
-    # ensure numeric
     df["frequency_Hz"] = pd.to_numeric(df["frequency_Hz"], errors="coerce")
     # find s-params columns and standardize names
     for expected in ["s11", "s21", "s12", "s22"]:
@@ -46,13 +36,10 @@ def read_sparam_csv(file) -> pd.DataFrame:
     return df
 
 def ensure_db_cols(df):
-    """If S-params exist in linear magnitude rather than dB, attempt to detect and convert."""
     for p in ["S11", "S21", "S12", "S22"]:
         col = p + "_dB"
         if col not in df.columns:
-            # check for plain p column
             if p in df.columns:
-                # assume linear magnitude, convert to dB
                 df[col] = 20 * np.log10(np.abs(df[p].astype(float)))
     return df
 
@@ -60,15 +47,12 @@ def magdb_to_linear(db):
     return 10 ** (db/20.0)
 
 def compute_vswr_from_S11_db(s11_db):
-    # handle values > 0 dB gracefully
     gamma = magdb_to_linear(s11_db)
-    # clamp gamma to <1 for VSWR calculation (avoid division by zero)
     gamma_clamped = np.minimum(np.maximum(gamma, 0.0), 0.999999)
     vswr = (1+gamma_clamped) / (1-gamma_clamped)
     return vswr
 
 def find_resonant_and_bw(df):
-    """Find resonant freq = freq of minimum S11_dB. Bandwidth where S11_dB < -10 dB (if any)."""
     out = {}
     if "S11_dB" not in df.columns:
         return out
@@ -77,11 +61,9 @@ def find_resonant_and_bw(df):
     idx_min = np.nanargmin(s11)
     out["resonant_freq_Hz"] = float(freq[idx_min])
     out["resonant_S11_dB"] = float(s11[idx_min])
-    # bandwidth detection (contiguous regions where s11 < -10)
     mask = s11 < -10
     bw_ranges = []
     if mask.any():
-        # find contiguous True segments
         i = 0
         n = len(mask)
         while i < n:
@@ -93,7 +75,6 @@ def find_resonant_and_bw(df):
                 i = j+1
             else:
                 i += 1
-        # merge into bandwidths
     out["bandwidth_ranges_Hz"] = bw_ranges
     return out
 
@@ -105,7 +86,6 @@ def prepare_summary(df):
         summary.update(metrics)
         summary["min_S11_dB"] = float(df["S11_dB"].min())
         summary["max_S21_dB"] = float(df["S21_dB"].max()) if "S21_dB" in df.columns else None
-    if "S11_dB" in df.columns:
         summary["vswr_mean"] = float(compute_vswr_from_S11_db(df["S11_dB"]).mean())
     summary["n_points"] = int(len(df))
     return summary
@@ -137,14 +117,12 @@ def export_summary_csv(summary: dict):
     return buf.getvalue().encode("utf-8")
 
 def try_create_pdf_report(title, summary, figs):
-    """Attempt to create a PDF report embedding PNGs. Returns bytes or None if reportlab not available."""
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.pdfgen import canvas
         from reportlab.lib.utils import ImageReader
-    except Exception as e:
+    except Exception:
         return None
-
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
@@ -159,13 +137,11 @@ def try_create_pdf_report(title, summary, figs):
         if y < 100:
             c.showPage()
             y = height - 50
-    # embed figures (as images)
     for fig in figs:
         try:
             img_bytes = fig_to_png_bytes(fig)
             if img_bytes:
                 img = ImageReader(io.BytesIO(img_bytes))
-                # scale to page width
                 iw, ih = img.getSize()
                 scale = min((width-80)/iw, (height-200)/ih)
                 w_img = iw*scale
@@ -183,10 +159,8 @@ def try_create_pdf_report(title, summary, figs):
     return pdf_bytes
 
 def fig_to_png_bytes(fig):
-    """Attempt to convert a Plotly figure to PNG bytes. Returns None if not possible."""
     try:
         import plotly.io as pio
-        # Requires kaleido
         png_bytes = pio.to_image(fig, format="png", width=1200, height=700, scale=1)
         return png_bytes
     except Exception:
@@ -196,7 +170,6 @@ def fig_to_png_bytes(fig):
 st.sidebar.title("Antenna Cloud Demo3")
 mode = st.sidebar.selectbox("Choose mode", ["S-Parameter Viewer", "Compare Antennas", "3D Radiation Pattern", "Summary / Report", "About"])
 
-# Placeholder for last loaded data in session_state
 if "last_df" not in st.session_state:
     st.session_state["last_df"] = None
 if "last_summary" not in st.session_state:
@@ -219,12 +192,52 @@ if mode == "S-Parameter Viewer":
 
         # plotting controls
         st.subheader("Plot settings")
-        show_sparams = st.multiselect("Select parameters to show (dB)", [c for c in df.columns if c.endswith("_dB")], default=[c for c in df.columns if c.endswith("_dB")][:2])
+        db_columns = [c for c in df.columns if c.endswith("_dB")]
+        show_sparams = st.multiselect("Select parameters to show (dB)", db_columns, default=db_columns[:2])
+
+        # Axis controls
+        st.subheader("Axis range controls")
+        auto_scale = st.checkbox("Auto-scale axes (use Plotly autoscale)", value=True)
+        # compute sensible defaults
+        freq_ghz = df["frequency_Hz"].to_numpy() / 1e9
+        f_min_default = float(np.nanmin(freq_ghz))
+        f_max_default = float(np.nanmax(freq_ghz))
+        if db_columns:
+            all_db = np.hstack([df[c].dropna().to_numpy() for c in db_columns])
+            y_default_min = float(np.nanmin(all_db)) - 5.0
+            y_default_max = float(np.nanmax(all_db)) + 2.0
+        else:
+            y_default_min, y_default_max = -60.0, 5.0
+
+        col_a, col_b = st.columns([2,2])
+        with col_a:
+            x_min, x_max = st.slider(
+                "X-axis range (GHz)",
+                min_value=0.0,
+                max_value=max(5.0, f_max_default),
+                value=(max(0.0, f_min_default), max(f_max_default, min(5.0, f_max_default))),
+                step=0.1
+            )
+        with col_b:
+            y_min, y_max = st.slider(
+                "Y-axis range (dB)",
+                min_value=-100.0,
+                max_value=+20.0,
+                value=(y_default_min, y_default_max),
+                step=0.5
+            )
+
         if show_sparams:
             fig = go.Figure()
             for p in show_sparams:
-                fig.add_trace(go.Scatter(x=df["frequency_Hz"]/1e9, y=df[p], name=p, mode="lines"))
-            fig.update_layout(title="S-Parameters", xaxis_title="Frequency (GHz)", yaxis_title="Magnitude (dB)", template="plotly_white")
+                if p in df.columns:
+                    fig.add_trace(go.Scatter(x=df["frequency_Hz"]/1e9, y=df[p], name=p, mode="lines"))
+            # apply axis ranges if not autoscale
+            layout_kwargs = dict(title="S-Parameters", xaxis_title="Frequency (GHz)", yaxis_title="Magnitude (dB)", template="plotly_white")
+            if not auto_scale:
+                layout_kwargs["xaxis"] = dict(range=[x_min, x_max])
+                layout_kwargs["yaxis"] = dict(range=[y_min, y_max])
+            fig.update_layout(**layout_kwargs)
             st.plotly_chart(fig, use_container_width=True)
             st.session_state["last_figs"]["sparams"] = fig
 
@@ -232,6 +245,9 @@ if mode == "S-Parameter Viewer":
         st.subheader("VSWR")
         vswr_fig = make_vswr_plot(df)
         if vswr_fig:
+            if not auto_scale:
+                # apply same x-range to vswr
+                vswr_fig.update_layout(xaxis=dict(range=[x_min, x_max]))
             st.plotly_chart(vswr_fig, use_container_width=True)
             st.session_state["last_figs"]["vswr"] = vswr_fig
 
@@ -245,11 +261,9 @@ if mode == "S-Parameter Viewer":
         st.subheader("Download")
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         st.download_button("Download processed CSV", csv_bytes, "processed_sparams.csv", "text/csv")
-        # download summary csv
         summary_csv = export_summary_csv(summary)
         st.download_button("Download summary CSV", summary_csv, "summary.csv", "text/csv")
 
-        # try export PNG images if possible
         st.write("Export plots as PNG (best-effort).")
         png_sparams = fig_to_png_bytes(st.session_state["last_figs"].get("sparams")) if st.session_state["last_figs"].get("sparams") else None
         png_vswr = fig_to_png_bytes(st.session_state["last_figs"].get("vswr")) if st.session_state["last_figs"].get("vswr") else None
@@ -266,6 +280,37 @@ elif mode == "Compare Antennas":
     file1 = col1.file_uploader("Upload file A", type=["csv"], key="cmp_a")
     file2 = col2.file_uploader("Upload file B", type=["csv"], key="cmp_b")
 
+    # Axis controls for compare mode
+    st.subheader("Comparison Axis Controls")
+    auto_scale_cmp = st.checkbox("Auto-scale axes for comparison", value=True, key="auto_cmp")
+    # We'll compute defaults only if files uploaded
+    x_min_cmp = 0.0
+    x_max_cmp = 3.0
+    y_min_cmp = -60.0
+    y_max_cmp = 5.0
+    if file1 or file2:
+        # estimate from whichever file is present
+        tmp = None
+        if file1:
+            tmp = ensure_db_cols(read_sparam_csv(file1))
+        elif file2:
+            tmp = ensure_db_cols(read_sparam_csv(file2))
+        if tmp is not None:
+            freq_tmp = tmp["frequency_Hz"].to_numpy()/1e9
+            x_min_cmp = float(np.nanmin(freq_tmp))
+            x_max_cmp = float(np.nanmax(freq_tmp))
+            db_cols_tmp = [c for c in tmp.columns if c.endswith("_dB")]
+            if db_cols_tmp:
+                all_db_tmp = np.hstack([tmp[c].dropna().to_numpy() for c in db_cols_tmp])
+                y_min_cmp = float(np.nanmin(all_db_tmp)) - 5.0
+                y_max_cmp = float(np.nanmax(all_db_tmp)) + 2.0
+
+    col_c1, col_c2 = st.columns([2,2])
+    with col_c1:
+        x_min_c, x_max_c = st.slider("X-axis range (GHz) - Compare", min_value=0.0, max_value=max(5.0, x_max_cmp), value=(x_min_cmp, max(x_max_cmp, 3.0)), step=0.1)
+    with col_c2:
+        y_min_c, y_max_c = st.slider("Y-axis range (dB) - Compare", min_value=-100.0, max_value=20.0, value=(y_min_cmp, y_max_cmp), step=0.5)
+
     if file1 and file2:
         df1 = ensure_db_cols(read_sparam_csv(file1))
         df2 = ensure_db_cols(read_sparam_csv(file2))
@@ -274,7 +319,6 @@ elif mode == "Compare Antennas":
         st.write("Preview B")
         st.dataframe(df2.head())
 
-        # Align frequency ranges by interpolation
         common_freq = np.linspace(max(df1["frequency_Hz"].min(), df2["frequency_Hz"].min()),
                                   min(df1["frequency_Hz"].max(), df2["frequency_Hz"].max()), 512)
         interp1 = {}
@@ -290,11 +334,14 @@ elif mode == "Compare Antennas":
             fig.add_trace(go.Scatter(x=common_freq/1e9, y=interp1["S11_dB"], name="A: S11"))
         if "S11_dB" in interp2:
             fig.add_trace(go.Scatter(x=common_freq/1e9, y=interp2["S11_dB"], name="B: S11"))
-        fig.update_layout(title="Comparison: S11 (A vs B)", xaxis_title="Freq (GHz)", yaxis_title="S11 (dB)", template="plotly_white")
+        layout_kwargs = dict(title="Comparison: S11 (A vs B)", xaxis_title="Freq (GHz)", yaxis_title="S11 (dB)", template="plotly_white")
+        if not auto_scale_cmp:
+            layout_kwargs["xaxis"] = dict(range=[x_min_c, x_max_c])
+            layout_kwargs["yaxis"] = dict(range=[y_min_c, y_max_c])
+        fig.update_layout(**layout_kwargs)
         st.plotly_chart(fig, use_container_width=True)
         st.session_state["last_figs"]["compare_s11"] = fig
 
-        # VSWR comparison
         vswr1 = compute_vswr_from_S11_db(interp1["S11_dB"]) if "S11_dB" in interp1 else None
         vswr2 = compute_vswr_from_S11_db(interp2["S11_dB"]) if "S11_dB" in interp2 else None
         fig2 = go.Figure()
@@ -302,11 +349,12 @@ elif mode == "Compare Antennas":
             fig2.add_trace(go.Scatter(x=common_freq/1e9, y=vswr1, name="A: VSWR"))
         if vswr2 is not None:
             fig2.add_trace(go.Scatter(x=common_freq/1e9, y=vswr2, name="B: VSWR"))
+        if not auto_scale_cmp:
+            fig2.update_layout(xaxis=dict(range=[x_min_c, x_max_c]), yaxis=dict(range=[None, None]))
         fig2.update_layout(title="Comparison: VSWR (A vs B)", xaxis_title="Freq (GHz)", yaxis_title="VSWR", template="plotly_white")
         st.plotly_chart(fig2, use_container_width=True)
         st.session_state["last_figs"]["compare_vswr"] = fig2
 
-        # Summary table
         summary_a = prepare_summary(df1)
         summary_b = prepare_summary(df2)
         st.subheader("Summary Comparison")
@@ -315,12 +363,10 @@ elif mode == "Compare Antennas":
                                 "B": [summary_b.get(k, None) for k in summary_a.keys()]})
         st.dataframe(comp_df)
 
-        # Download comparison results as ZIP (CSV + plots)
         with io.BytesIO() as mem_zip:
             with zipfile.ZipFile(mem_zip, mode="w") as zf:
                 zf.writestr("summary_A.csv", pd.DataFrame([summary_a]).to_csv(index=False))
                 zf.writestr("summary_B.csv", pd.DataFrame([summary_b]).to_csv(index=False))
-                # attach plots if possible
                 png1 = fig_to_png_bytes(st.session_state["last_figs"].get("compare_s11"))
                 png2 = fig_to_png_bytes(st.session_state["last_figs"].get("compare_vswr"))
                 if png1:
@@ -340,7 +386,6 @@ elif mode == "3D Radiation Pattern":
 
     if rad_file is not None:
         rad_df = pd.read_csv(rad_file)
-        # expected columns
         if not set(["theta", "phi", "gain_dbi"]).issubset({c.lower() for c in rad_df.columns}):
             st.warning("CSV should contain columns named theta, phi, gain_dBi (case-insensitive). Attempting to map...")
             lower_map = {c.lower(): c for c in rad_df.columns}
@@ -354,17 +399,13 @@ elif mode == "3D Radiation Pattern":
 
     if rad_df is None and use_synthetic:
         st.info("Using synthetic radiation pattern.")
-        # generate synthetic doughnut-ish pattern over theta (0-180) and phi (0-360)
-        thetas = np.linspace(0, np.pi, 61)  # 0..pi
-        phis = np.linspace(0, 2*np.pi, 73)  # 0..2pi
+        thetas = np.linspace(0, np.pi, 61)
+        phis = np.linspace(0, 2*np.pi, 73)
         TH, PH = np.meshgrid(thetas, phis)
-        # synthetic gain pattern: main lobe at theta=pi/2 with cos^n shape
         n = 8
         G = (np.cos(TH - np.pi/2) ** 2) * (1 / (1 + 0.2*(np.sin(PH*2))))
-        # normalize and convert to dBi-like
         G = np.maximum(G, 1e-4)
-        Gd = 10 * np.log10(G / G.max()) + 8  # scaled so peak ~ +8 dBi
-        # Convert to Cartesian for surface plot
+        Gd = 10 * np.log10(G / G.max()) + 8
         X = (1 + G/np.max(G)) * np.sin(TH) * np.cos(PH)
         Y = (1 + G/np.max(G)) * np.sin(TH) * np.sin(PH)
         Z = (1 + G/np.max(G)) * np.cos(TH)
@@ -374,24 +415,16 @@ elif mode == "3D Radiation Pattern":
         st.plotly_chart(fig3d, use_container_width=True, height=700)
         st.session_state["last_figs"]["3d"] = fig3d
     elif rad_df is not None:
-        # pivot to grid and plot using interpolation
-        # normalize column names
         rad_df = rad_df.rename(columns={c:c.strip() for c in rad_df.columns})
         lower_map = {c.lower():c for c in rad_df.columns}
         theta_col = lower_map.get("theta")
         phi_col = lower_map.get("phi")
         gain_col = lower_map.get("gain_dbi") or lower_map.get("gain_db") or lower_map.get("gain")
         rad_df = rad_df.rename(columns={theta_col:"theta", phi_col:"phi", gain_col:"gain_dBi"})
-        # build grid
         thetas = np.unique(rad_df["theta"])
         phis = np.unique(rad_df["phi"])
-        # pivot
         try:
             grid = rad_df.pivot(index="phi", columns="theta", values="gain_dBi")
-            X = np.zeros_like(grid.values)
-            Y = np.zeros_like(grid.values)
-            Z = np.zeros_like(grid.values)
-            # convert spherical to cartesian for visualization
             TH, PH = np.meshgrid(grid.columns*np.pi/180.0, grid.index*np.pi/180.0)
             R = 1 + (grid.values - np.nanmin(grid.values)) / (np.nanmax(grid.values) - np.nanmin(grid.values) + 1e-6)
             X = R * np.sin(TH) * np.cos(PH)
@@ -425,22 +458,18 @@ elif mode == "Summary / Report":
         st.json(summary)
         st.session_state["last_summary"] = summary
 
-        # create plots for report
         fig_s = make_plot_sparams(df, title="S-Parameters for Report")
         fig_v = make_vswr_plot(df, title="VSWR for Report")
         figs = [f for f in [fig_s, fig_v] if f is not None]
 
-        # create summary CSV
         summary_csv = export_summary_csv(summary)
         st.download_button("Download summary CSV", summary_csv, "demo3_summary.csv", "text/csv")
 
-        # attempt PDF creation
         pdf_bytes = try_create_pdf_report("Antenna Report (Demo3)", summary, figs)
         if pdf_bytes:
             st.download_button("Download PDF Report", pdf_bytes, "antenna_report.pdf", "application/pdf")
         else:
             st.info("Automatic PDF creation requires 'reportlab' and 'kaleido' to embed images. Falling back to ZIP.")
-            # create ZIP with summary and PNGs (PNG best-effort using kaleido)
             with io.BytesIO() as mem_zip:
                 with zipfile.ZipFile(mem_zip, mode="w") as zf:
                     zf.writestr("summary.csv", summary_csv)
