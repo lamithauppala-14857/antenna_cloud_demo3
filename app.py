@@ -1,4 +1,4 @@
-# app.py - Antenna Cloud Demo3 (Robust Reader + Inspector)
+# app.py - Antenna Cloud Demo3 (3D radiation fix + robust readers)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,16 +8,14 @@ from pathlib import Path
 from pandas.errors import EmptyDataError
 import plotly.graph_objects as go
 
+# for interpolation of scattered radiation points
+from scipy.interpolate import griddata
+
 st.set_page_config("Antenna Cloud Demo3", layout="wide", initial_sidebar_state="expanded")
 
-# ---------- Robust CSV reader ----------
-def read_sparam_csv(file) -> pd.DataFrame:
-    """
-    Robust CSV reader for Streamlit UploadedFile or a local path.
-    Returns DataFrame with 'frequency_Hz' and *_dB columns if present.
-    Raises ValueError on failure with friendly message.
-    """
-    # quick size check (Streamlit UploadedFile has .size attr)
+# ---------------- Robust CSV reader ----------------
+def read_csv_bytes(file) -> str:
+    """Return decoded text from Streamlit UploadedFile or a path-like input."""
     try:
         size = getattr(file, "size", None)
     except Exception:
@@ -25,11 +23,10 @@ def read_sparam_csv(file) -> pd.DataFrame:
     if size == 0:
         raise ValueError("Uploaded file is empty (0 bytes). Please re-upload a valid CSV.")
 
-    # read raw bytes
     try:
-        if hasattr(file, "getvalue"):         # UploadedFile
+        if hasattr(file, "getvalue"):          # Streamlit UploadedFile
             raw = file.getvalue()
-        elif isinstance(file, (str, Path)):   # path string
+        elif isinstance(file, (str, Path)):    # local path
             with open(file, "rb") as fh:
                 raw = fh.read()
         else:
@@ -40,23 +37,27 @@ def read_sparam_csv(file) -> pd.DataFrame:
     if not raw:
         raise ValueError("Uploaded file appears empty. Please check the file and try again.")
 
-    # decode text (try utf-8 then latin1)
-    txt = None
+    # try decodings
     for enc in ("utf-8", "latin1"):
         try:
             txt = raw.decode(enc)
-            break
+            return txt
         except Exception:
             continue
-    if txt is None:
-        raise ValueError("Uploaded file encoding not supported (not utf-8/latin1).")
+    raise ValueError("Uploaded file encoding not supported (try saving as UTF-8).")
 
-    # attempt parsing with common separators
+def smart_read_dataframe(file) -> pd.DataFrame:
+    """
+    Read an uploaded file robustly: try common delimiters and encodings.
+    Returns a pandas DataFrame or raises ValueError.
+    """
+    txt = read_csv_bytes(file)
     df = None
     for sep in [",", ";", "\t", "|"]:
         try:
-            df = pd.read_csv(io.StringIO(txt), sep=sep)
-            if df.shape[1] >= 1 and df.shape[0] >= 1:
+            df_try = pd.read_csv(io.StringIO(txt), sep=sep)
+            if df_try.shape[1] >= 1 and df_try.shape[0] >= 1:
+                df = df_try
                 break
         except EmptyDataError:
             df = None
@@ -64,25 +65,29 @@ def read_sparam_csv(file) -> pd.DataFrame:
         except Exception:
             df = None
             continue
-
     if df is None or df.shape[1] == 0:
-        raise ValueError("No columns found in CSV. Ensure it has headers like frequency_Hz,S11_dB,... and is not empty.")
-
-    # normalize columns
+        raise ValueError("No columns found. Ensure CSV has headers and is not empty.")
+    # strip column names
     df.rename(columns={c: c.strip() for c in df.columns}, inplace=True)
+    return df
 
-    # find frequency column
+# ---------------- S-parameter utilities ----------------
+def read_sparam_csv(file) -> pd.DataFrame:
+    df = smart_read_dataframe(file)
+    # detect frequency column
     freq_cols = [c for c in df.columns if "freq" in c.lower() or "frequency" in c.lower()]
     freq_col = freq_cols[0] if freq_cols else df.columns[0]
     df = df.rename(columns={freq_col: "frequency_Hz"})
     df["frequency_Hz"] = pd.to_numeric(df["frequency_Hz"], errors="coerce")
 
-    # map s-params to *_dB columns if present
+    # detect s-params
     for expected in ["s11", "s21", "s12", "s22"]:
         candidates = [c for c in df.columns if expected in c.lower().replace(" ", "")]
         if candidates:
-            df[expected.upper() + "_dB"] = pd.to_numeric(df[candidates[0]], errors="coerce")
-
+            try:
+                df[expected.upper() + "_dB"] = pd.to_numeric(df[candidates[0]], errors="coerce")
+            except Exception:
+                df[expected.upper() + "_dB"] = pd.to_numeric(df[candidates[0]].astype(str).str.replace('"', '').str.strip(), errors="coerce")
     return df
 
 def ensure_db_cols(df):
@@ -153,7 +158,89 @@ def export_summary_csv(summary: dict):
     pd.DataFrame([summary]).to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
-# ---------- UI & Modes ----------
+# ---------------- 3D radiation builder ----------------
+def build_3d_pattern_from_rad_df(rad_df, grid_n_theta=61, grid_n_phi=73):
+    """
+    Input rad_df must contain columns theta (deg), phi (deg), gain_dBi (or gain).
+    Accepts both regular grid (phi x theta) or scattered points; returns Plotly surface figure.
+    """
+    # Normalize column names
+    col_map = {c.lower().strip(): c for c in rad_df.columns}
+    # find columns
+    theta_col = col_map.get("theta") or col_map.get("theta_deg") or col_map.get("theta (deg)")
+    phi_col = col_map.get("phi") or col_map.get("phi_deg") or col_map.get("phi (deg)")
+    gain_col = col_map.get("gain_dbi") or col_map.get("gain_db") or col_map.get("gain") or col_map.get("gain (dBi)")
+
+    if theta_col is None or phi_col is None or gain_col is None:
+        raise ValueError("Radiation CSV needs columns named theta, phi, and gain_dBi (case-insensitive).")
+
+    # convert to numeric arrays
+    thetas = pd.to_numeric(rad_df[theta_col], errors="coerce").to_numpy()
+    phis = pd.to_numeric(rad_df[phi_col], errors="coerce").to_numpy()
+    gains = pd.to_numeric(rad_df[gain_col], errors="coerce").to_numpy()
+    if np.isnan(thetas).any() or np.isnan(phis).any() or np.isnan(gains).any():
+        # drop NaNs
+        mask = ~(np.isnan(thetas) | np.isnan(phis) | np.isnan(gains))
+        thetas = thetas[mask]; phis = phis[mask]; gains = gains[mask]
+
+    if len(thetas) == 0:
+        raise ValueError("No valid numeric theta/phi/gain data found.")
+
+    # If the data looks like a grid already (unique counts multiply to length), pivot
+    unique_t = np.unique(thetas)
+    unique_p = np.unique(phis)
+    is_regular = (len(unique_t) * len(unique_p) == len(gains))
+
+    if is_regular:
+        # pivot to grid (phi as rows, theta as cols)
+        try:
+            df_pivot = rad_df.copy()
+            df_pivot[theta_col] = pd.to_numeric(df_pivot[theta_col], errors="coerce")
+            df_pivot[phi_col] = pd.to_numeric(df_pivot[phi_col], errors="coerce")
+            df_pivot[gain_col] = pd.to_numeric(df_pivot[gain_col], errors="coerce")
+            grid = df_pivot.pivot(index=phi_col, columns=theta_col, values=gain_col)
+            TH_deg = grid.columns.values.astype(float)
+            PH_deg = grid.index.values.astype(float)
+            TH, PH = np.meshgrid(TH_deg * np.pi/180.0, PH_deg * np.pi/180.0)
+            G = grid.values
+        except Exception as e:
+            # fall back to scattered interpolation
+            is_regular = False
+
+    if not is_regular:
+        # build a regular grid and interpolate scattered points onto it
+        theta_lin = np.linspace(0, 180, grid_n_theta)   # deg
+        phi_lin = np.linspace(0, 360, grid_n_phi)       # deg
+        TH_deg, PH_deg = np.meshgrid(theta_lin, phi_lin)
+        # griddata expects points in (theta,phi) pairs
+        pts = np.vstack([thetas, phis]).T
+        try:
+            G = griddata(points=pts, values=gains, xi=(TH_deg, PH_deg), method='linear')
+            # where linear gives NaN (outside convex hull), try nearest
+            nan_mask = np.isnan(G)
+            if nan_mask.any():
+                G_nearest = griddata(points=pts, values=gains, xi=(TH_deg, PH_deg), method='nearest')
+                G[nan_mask] = G_nearest[nan_mask]
+            TH = TH_deg * np.pi/180.0
+            PH = PH_deg * np.pi/180.0
+        except Exception as e:
+            raise ValueError(f"Failed to interpolate radiation data: {e}")
+
+    # Normalize R to emphasize gain (so surface shows variations)
+    G_valid = np.nan_to_num(G, nan=np.nanmin(G))
+    R = 1 + (G_valid - np.nanmin(G_valid)) / (np.nanmax(G_valid) - np.nanmin(G_valid) + 1e-9)
+
+    # Convert spherical (r=R, theta polar, phi azimuth) to cartesian for plotting
+    X = R * np.sin(TH) * np.cos(PH)
+    Y = R * np.sin(TH) * np.sin(PH)
+    Z = R * np.cos(TH)
+
+    surface = go.Surface(x=X, y=Y, z=Z, surfacecolor=G_valid, colorscale="Viridis", cmin=np.nanmin(G_valid), cmax=np.nanmax(G_valid))
+    fig = go.Figure(data=[surface])
+    fig.update_layout(title="3D Radiation Pattern (surfacecolor = gain dB)", scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
+    return fig
+
+# ---------------- UI ----------------
 st.sidebar.title("Antenna Cloud Demo3")
 mode = st.sidebar.selectbox("Choose mode", ["S-Parameter Viewer", "Compare Antennas", "3D Radiation Pattern", "Summary / Report", "About"])
 
@@ -164,9 +251,9 @@ if "last_summary" not in st.session_state:
 if "last_figs" not in st.session_state:
     st.session_state["last_figs"] = {}
 
-# ---------- Mode 1: S-Parameter Viewer ----------
+# ---------------- Mode 1: Viewer ----------------
 if mode == "S-Parameter Viewer":
-    st.header("📈 S-Parameter Viewer & Sweep Tool")
+    st.header("📈 S-Parameter Viewer")
     uploaded_file = st.file_uploader("Upload S-parameter CSV file", type=["csv"], key="viewer_file")
     if uploaded_file is not None:
         try:
@@ -180,11 +267,11 @@ if mode == "S-Parameter Viewer":
         st.write("Preview:")
         st.dataframe(df.head())
 
+        # plot controls
         st.subheader("Plot settings")
         db_columns = [c for c in df.columns if c.endswith("_dB")]
         show_sparams = st.multiselect("Select parameters to show (dB)", db_columns, default=db_columns[:2])
 
-        # Axis controls
         st.subheader("Axis range controls")
         auto_scale = st.checkbox("Auto-scale axes (Plotly autoscale)", value=True)
         freq_ghz = df["frequency_Hz"].to_numpy() / 1e9
@@ -230,7 +317,6 @@ if mode == "S-Parameter Viewer":
 
         # VSWR
         st.subheader("VSWR")
-        vswr_fig = None
         if "S11_dB" in df.columns:
             vswr_fig = go.Figure()
             vswr = compute_vswr_from_S11_db(df["S11_dB"].to_numpy())
@@ -246,11 +332,7 @@ if mode == "S-Parameter Viewer":
         st.session_state["last_summary"] = summary
         st.json(summary)
 
-        st.subheader("Download")
-        st.download_button("Download processed CSV", df.to_csv(index=False).encode("utf-8"), "processed_sparams.csv", "text/csv")
-        st.download_button("Download summary CSV", export_summary_csv(summary), "summary.csv", "text/csv")
-
-# ---------- Mode 2: Compare Antennas ----------
+# ---------------- Mode 2: Compare ----------------
 elif mode == "Compare Antennas":
     st.header("🔁 Antenna Comparison Tool")
     st.write("Upload two S-parameter CSV files to compare S11 and VSWR side-by-side.")
@@ -258,7 +340,7 @@ elif mode == "Compare Antennas":
     file1 = c1.file_uploader("Upload file A", type=["csv"], key="cmp_a")
     file2 = c2.file_uploader("Upload file B", type=["csv"], key="cmp_b")
 
-    # --- inspector (temporary helpful debug) ---
+    # inspector
     def inspect_upload(f, label):
         if f is None:
             st.write(f"{label}: not uploaded")
@@ -274,9 +356,7 @@ elif mode == "Compare Antennas":
 
     inspect_upload(file1, "File A")
     inspect_upload(file2, "File B")
-    # --- end inspector ---
 
-    # axis controls for compare
     st.subheader("Comparison Axis Controls")
     auto_scale_cmp = st.checkbox("Auto-scale axes for comparison", value=True, key="auto_cmp")
     x_min_c, x_max_c = 0.0, 3.0
@@ -343,36 +423,20 @@ elif mode == "Compare Antennas":
                                 "B": [summary_b.get(k, None) for k in summary_a.keys()]})
         st.dataframe(comp_df)
 
-        # zip results
-        with io.BytesIO() as mem_zip:
-            with zipfile.ZipFile(mem_zip, mode="w") as zf:
-                zf.writestr("summary_A.csv", pd.DataFrame([summary_a]).to_csv(index=False))
-                zf.writestr("summary_B.csv", pd.DataFrame([summary_b]).to_csv(index=False))
-            mem_zip.seek(0)
-            st.download_button("Download comparison ZIP", mem_zip.read(), "comparison_results.zip", "application/zip")
-
-# ---------- Mode 3: 3D Radiation Pattern ----------
+# ---------------- Mode 3: 3D Radiation Pattern ----------------
 elif mode == "3D Radiation Pattern":
     st.header("🌐 3D Radiation Pattern Viewer")
-    st.write("Upload a radiation CSV with columns: theta, phi, gain_dBi OR use synthetic sample.")
+    st.write("Upload a radiation CSV with columns: theta, phi, gain_dBi  OR use a synthetic sample to preview.")
     rad_file = st.file_uploader("Upload radiation CSV (theta,phi,gain_dBi)", type=["csv"], key="rad_file")
     use_synthetic = st.checkbox("Use synthetic sample pattern (if no file uploaded)", value=True)
 
     rad_df = None
     if rad_file is not None:
         try:
-            txt = rad_file.getvalue().decode("utf-8")
-            rad_df = pd.read_csv(io.StringIO(txt))
-            # normalize
-            if not set(["theta", "phi", "gain_dbi"]).issubset({c.lower() for c in rad_df.columns}):
-                st.warning("CSV should contain theta, phi, gain_dBi (case-insensitive). Attempting to map...")
-                lower_map = {c.lower(): c for c in rad_df.columns}
-                if "theta" in lower_map and "phi" in lower_map and "gain_dbi" in lower_map:
-                    rad_df = rad_df.rename(columns={lower_map["theta"]:"theta", lower_map["phi"]:"phi", lower_map["gain_dbi"]:"gain_dBi"})
-                else:
-                    st.error("Couldn't find required columns.")
-                    rad_df = None
-        except Exception as e:
+            rad_df = smart_read_dataframe(rad_file)
+            # map possible column variants - we'll do the mapping inside build function
+            # just keep rad_df as is for processing
+        except ValueError as e:
             st.error(f"Error reading radiation CSV: {e}")
             rad_df = None
 
@@ -389,11 +453,21 @@ elif mode == "3D Radiation Pattern":
         Z = (1 + G/np.max(G)) * np.cos(TH)
         surf = go.Surface(x=X, y=Y, z=Z, surfacecolor=Gd, colorscale="Viridis")
         fig3d = go.Figure(data=[surf])
-        fig3d.update_layout(title="Synthetic 3D Radiation Pattern", scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
+        fig3d.update_layout(title="Synthetic 3D Radiation Pattern (surfacecolor = gain dB)", scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
         st.plotly_chart(fig3d, use_container_width=True, height=700)
         st.session_state["last_figs"]["3d"] = fig3d
+    elif rad_df is not None:
+        # attempt build
+        try:
+            fig3d = build_3d_pattern_from_rad_df(rad_df)
+            st.plotly_chart(fig3d, use_container_width=True, height=700)
+            st.session_state["last_figs"]["3d"] = fig3d
+        except Exception as e:
+            st.error(f"Failed to convert radiation data to 3D surface: {e}")
+            st.info("If your file is scattered (not a full grid), the app will attempt interpolation. "
+                    "Best: export HFSS pattern on a regular theta x phi grid (theta 0..180, phi 0..360).")
 
-# ---------- Mode 4: Summary / Report ----------
+# ---------------- Mode 4: Summary / Report ----------------
 elif mode == "Summary / Report":
     st.header("🧾 Summary & Report Generation")
     st.write("Use the last loaded S-parameter dataset or upload a file now.")
@@ -415,17 +489,19 @@ elif mode == "Summary / Report":
         st.json(summary)
         st.download_button("Download summary CSV", export_summary_csv(summary), "demo3_summary.csv", "text/csv")
 
-# ---------- Mode 5: About ----------
+# ---------------- Mode 5: About ----------------
 elif mode == "About":
     st.header("About Antenna Cloud Demo3")
     st.markdown("""
-    **Antenna Cloud Demo3** — Robust version with friendly CSV validation.
+    **Antenna Cloud Demo3** — Robust version with improved 3D radiation handling.
     - S-Parameter viewer + VSWR and metrics
-    - Comparison with upload inspector and safe error handling
-    - 3D radiation pattern viewer (synthetic or from uploaded data)
+    - Comparison tool with upload inspector and safe handling
+    - 3D radiation pattern viewer (accepts grid or scattered points; will interpolate)
     - Summary generation and downloads
     Notes:
-    - For best results, upload CSVs with columns like: `frequency_Hz,S11_dB,S21_dB,S12_dB,S22_dB`
-    - Radiation CSV: `theta,phi,gain_dBi`
+    - For best results, upload radiation CSVs with columns: theta (deg), phi (deg), gain_dBi
+    - If the pattern doesn't show, try exporting HFSS radiation on a regular theta x phi grid.
     """)
+
+
 
