@@ -221,7 +221,7 @@ if "last_df" not in st.session_state:
 # MODE 1: UPDATED S-PARAMETER VIEWER (Option B-3)
 # --------------------------------------------------------------------------
 if mode=="S-Parameter Viewer":
-    st.header("📈 S-Parameter Viewer (Now with infinite-line extrapolation)")
+    st.header("📈 S-Parameter Viewer")
     file = st.file_uploader("Upload CSV", type=["csv"])
 
     if file:
