@@ -302,32 +302,88 @@ if mode=="S-Parameter Viewer":
 # --------------------------------------------------------------------------
 # MODE 2: COMPARE (UNCHANGED)
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# MODE 2: COMPARE (WITH VSWR COMPARISON RESTORED)
+# --------------------------------------------------------------------------
 elif mode=="Compare Antennas":
     st.header("🔁 Compare Antennas")
-    st.info("This module is unchanged from your original code.")
-    st.write("Upload two files...")
-    # -------------- unchanged code --------------
-    # Keeping content identical so your app behavior stays same
-    c1,c2=st.columns(2)
-    f1=c1.file_uploader("File A",type=["csv"])
-    f2=c2.file_uploader("File B",type=["csv"])
+    c1, c2 = st.columns(2)
+    f1 = c1.file_uploader("File A", type=["csv"])
+    f2 = c2.file_uploader("File B", type=["csv"])
+
     if f1 and f2:
         try:
-            df1=ensure_db_cols(read_sparam_csv(f1))
-            df2=ensure_db_cols(read_sparam_csv(f2))
+            df1 = ensure_db_cols(read_sparam_csv(f1))
+            df2 = ensure_db_cols(read_sparam_csv(f2))
         except Exception as e:
-            st.error(str(e)); st.stop()
+            st.error(str(e))
+            st.stop()
 
-        st.write("Preview A:"); st.dataframe(df1.head())
-        st.write("Preview B:"); st.dataframe(df2.head())
+        st.write("Preview A:")
+        st.dataframe(df1.head())
 
-        common = np.linspace(max(df1.frequency_Hz.min(), df2.frequency_Hz.min()),
-                             min(df1.frequency_Hz.max(), df2.frequency_Hz.max()),500)
-        fig=go.Figure()
-        if "S11_dB" in df1: fig.add_trace(go.Scatter(x=common/1e9,y=np.interp(common,df1.frequency_Hz,df1["S11_dB"]),name="A S11"))
-        if "S11_dB" in df2: fig.add_trace(go.Scatter(x=common/1e9,y=np.interp(common,df2.frequency_Hz,df2["S11_dB"]),name="B S11"))
-        fig.update_layout(title="Compare S11",template="plotly_white")
-        st.plotly_chart(fig,use_container_width=True)
+        st.write("Preview B:")
+        st.dataframe(df2.head())
+
+        # Common frequency range
+        common_freq = np.linspace(
+            max(df1["frequency_Hz"].min(), df2["frequency_Hz"].min()),
+            min(df1["frequency_Hz"].max(), df2["frequency_Hz"].max()),
+            600
+        )
+
+        # ---- S11 Comparison ----
+        fig = go.Figure()
+        if "S11_dB" in df1:
+            fig.add_trace(go.Scatter(
+                x=common_freq/1e9,
+                y=np.interp(common_freq, df1["frequency_Hz"], df1["S11_dB"]),
+                name="A: S11"
+            ))
+        if "S11_dB" in df2:
+            fig.add_trace(go.Scatter(
+                x=common_freq/1e9,
+                y=np.interp(common_freq, df2["frequency_Hz"], df2["S11_dB"]),
+                name="B: S11"
+            ))
+        fig.update_layout(
+            title="Comparison: S11",
+            xaxis_title="Frequency (GHz)",
+            yaxis_title="S11 (dB)",
+            template="plotly_white"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ---- VSWR Comparison ----
+        fig_vswr = go.Figure()
+
+        if "S11_dB" in df1:
+            s11_interp_1 = np.interp(common_freq, df1["frequency_Hz"], df1["S11_dB"])
+            vswr1 = compute_vswr_from_S11_db(s11_interp_1)
+            fig_vswr.add_trace(go.Scatter(
+                x=common_freq/1e9,
+                y=vswr1,
+                name="A: VSWR"
+            ))
+
+        if "S11_dB" in df2:
+            s11_interp_2 = np.interp(common_freq, df2["frequency_Hz"], df2["S11_dB"])
+            vswr2 = compute_vswr_from_S11_db(s11_interp_2)
+            fig_vswr.add_trace(go.Scatter(
+                x=common_freq/1e9,
+                y=vswr2,
+                name="B: VSWR"
+            ))
+
+        fig_vswr.update_layout(
+            title="Comparison: VSWR",
+            xaxis_title="Frequency (GHz)",
+            yaxis_title="VSWR",
+            template="plotly_white"
+        )
+
+        st.plotly_chart(fig_vswr, use_container_width=True)
+
 
 # --------------------------------------------------------------------------
 # MODE 3: RADIATION (UNCHANGED)
