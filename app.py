@@ -389,20 +389,22 @@ elif mode=="Compare Antennas":
 # MODE 3: RADIATION (UNCHANGED)
 # --------------------------------------------------------------------------
 elif mode=="3D Radiation Pattern":
+
     st.header("🌐 3D Radiation Pattern Viewer")
 
     rad = st.file_uploader("Upload radiation CSV", type=["csv"])
+
     use_syn = st.checkbox("Use synthetic example", True)
 
     if rad:
+
         try:
+
             d = smart_read_dataframe(rad)
 
-            # ------------------------------
-            # Detect HFSS columns automatically
-            # ------------------------------
+            # Automatically detect theta column
             theta_col = None
-            gain_cols = []
+            gain_col = None
 
             for c in d.columns:
                 cl = c.lower()
@@ -411,32 +413,29 @@ elif mode=="3D Radiation Pattern":
                     theta_col = c
 
                 if "gain" in cl:
-                    gain_cols.append(c)
+                    gain_col = c
 
-            if theta_col is None or len(gain_cols) == 0:
-                st.error("Could not detect radiation columns from CSV.")
+            if theta_col is None or gain_col is None:
+                st.error("Radiation CSV must contain theta and gain columns.")
                 st.stop()
 
             theta = pd.to_numeric(d[theta_col], errors="coerce").to_numpy()
-
-            # Use first gain column
-            gain = pd.to_numeric(d[gain_cols[0]], errors="coerce").to_numpy()
+            gain = pd.to_numeric(d[gain_col], errors="coerce").to_numpy()
 
             theta = np.deg2rad(theta)
 
-            # Create fake phi sweep to build 3D surface
             phi = np.linspace(0, 2*np.pi, 73)
 
             TH, PH = np.meshgrid(theta, phi)
 
             G = np.tile(gain, (len(phi),1))
 
-            # Normalize gain for radius
+            # Normalize gain
             R = 1 + (G - np.nanmin(G)) / (np.nanmax(G) - np.nanmin(G) + 1e-9)
 
-            X = R * np.sin(TH) * np.cos(PH)
-            Y = R * np.sin(TH) * np.sin(PH)
-            Z = R * np.cos(TH)
+            X = R*np.sin(TH)*np.cos(PH)
+            Y = R*np.sin(TH)*np.sin(PH)
+            Z = R*np.cos(TH)
 
             surf = go.Surface(
                 x=X,
@@ -460,19 +459,23 @@ elif mode=="3D Radiation Pattern":
             st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
+
             st.error(str(e))
 
     else:
+
         if use_syn:
+
             st.info("Synthetic pattern shown.")
 
-            θ = np.linspace(0,np.pi,61)
-            φ = np.linspace(0,2*np.pi,73)
+            θ=np.linspace(0,np.pi,61)
+            φ=np.linspace(0,2*np.pi,73)
 
             TH,PH=np.meshgrid(θ,φ)
 
-            G = (np.cos(TH-np.pi/2)**2)
-            Gd = 10*np.log10(G/G.max()+1e-9)
+            G=(np.cos(TH-np.pi/2)**2)
+
+            Gd=10*np.log10(G/G.max()+1e-9)
 
             X=np.sin(TH)*np.cos(PH)
             Y=np.sin(TH)*np.sin(PH)
@@ -483,6 +486,7 @@ elif mode=="3D Radiation Pattern":
             fig=go.Figure(data=[surf])
 
             st.plotly_chart(fig,use_container_width=True)
+
 
 # --------------------------------------------------------------------------
 # MODE 4: SUMMARY (UNCHANGED)
