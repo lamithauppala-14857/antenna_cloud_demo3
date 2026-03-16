@@ -428,25 +428,11 @@ elif mode=="3D Radiation Pattern":
 
             d = smart_read_dataframe(rad)
 
-            # Automatically detect theta column
-            theta_col = None
-            gain_col = None
+            # Force first column as theta
+            theta = pd.to_numeric(d.iloc[:,0], errors="coerce").to_numpy()
 
-            for c in d.columns:
-                cl = c.lower()
-
-                if "theta" in cl:
-                    theta_col = c
-
-                if "gain" in cl:
-                    gain_col = c
-
-            if theta_col is None or gain_col is None:
-                st.error("Radiation CSV must contain theta and gain columns.")
-                st.stop()
-
-            theta = pd.to_numeric(d[theta_col], errors="coerce").to_numpy()
-            gain = pd.to_numeric(d[gain_col], errors="coerce").to_numpy()
+            # Force second column as gain
+            gain = pd.to_numeric(d.iloc[:,1], errors="coerce").to_numpy()
 
             theta = np.deg2rad(theta)
 
@@ -456,7 +442,6 @@ elif mode=="3D Radiation Pattern":
 
             G = np.tile(gain, (len(phi),1))
 
-            # Normalize gain
             R = 1 + (G - np.nanmin(G)) / (np.nanmax(G) - np.nanmin(G) + 1e-9)
 
             X = R*np.sin(TH)*np.cos(PH)
@@ -485,7 +470,6 @@ elif mode=="3D Radiation Pattern":
             st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
-
             st.error(str(e))
 
     else:
